@@ -21,7 +21,7 @@ import torchaudio
 import librosa
 import numpy as np
 import pandas as pd
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 from datetime import timedelta
 from pathlib import Path
 import base64
@@ -73,7 +73,7 @@ def load_yolo_models():
         from ultralytics import YOLO
         models.append(YOLO('./model/ambulance_firetruck.pt'))
         models.append(YOLO('./model/smoke_and_fire_best.pt'))
-        models.append(YOLO('yolo_model3.pt'))
+        #models.append(YOLO('yolo_model3.pt'))
     except Exception:
         # fallback: dummy None list (user must replace)
         models = [None, None, None]
