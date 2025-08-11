@@ -84,8 +84,8 @@ def load_rcnn_models():
     # Replace with your RCNN model loading (torch.load or model definition + load_state_dict)
     models = []
     try:
-        m1 = torch.load('rcnn_model1.pth', map_location='cpu')
-        m2 = torch.load('rcnn_model2.pth', map_location='cpu')
+        m1 = torch.load('./model/crash_sound_best.pt', map_location='cpu')
+        m2 = torch.load('./model/rcnn_siren_best.pt', map_location='cpu')
         m1.eval(); m2.eval()
         models = [m1, m2]
     except Exception:
