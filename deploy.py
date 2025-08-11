@@ -73,7 +73,7 @@ def load_yolo_models():
         from ultralytics import YOLO
         models.append(YOLO('./model/ambulance_firetruck.pt'))
         models.append(YOLO('./model/smoke_and_fire_best.pt'))
-        #models.append(YOLO('yolo_model3.pt'))
+        models.append(YOLO('./model/crash_best.pt'))
     except Exception:
         # fallback: dummy None list (user must replace)
         models = [None, None, None]
