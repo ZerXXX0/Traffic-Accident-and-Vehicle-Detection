@@ -258,19 +258,28 @@ def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn
         sample_rate=sr,
         n_mels=64
     ).to(device)
+    
     results = []
     total_len = len(waveform)
+    
     for m in rcnn_models:
         model_res = []
         for ts in timestamps:
-            start = int(max(0, (ts - clip_length_sec/2) * sr))
+            start = int(max(0, (ts - clip_length_sec / 2) * sr))
             end = int(min(total_len, start + clip_length_sec * sr))
             seg = waveform[start:end]
+
+            # Ensure it's always a NumPy array (not a scalar)
+            seg = np.array(seg, dtype=np.float32)
+
+            # Skip empty segments or missing model
             if seg.size == 0 or m is None:
                 model_res.append(None)
                 continue
 
-            seg_tensor = torch.tensor(seg).float().to(device)
+            # Convert to tensor safely
+            seg_tensor = torch.as_tensor(seg, dtype=torch.float32, device=device)
+
             mel_spec = mel_transform(seg_tensor)  # (n_mels, time)
             mel_spec = mel_spec.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, n_mels, time)
 
@@ -281,7 +290,9 @@ def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn
                 model_res.append({'pred': pred, 'probs': probs.tolist()})
 
         results.append(model_res)
+    
     return results
+
 
 # ----------------------------
 # Streamlit app UI
