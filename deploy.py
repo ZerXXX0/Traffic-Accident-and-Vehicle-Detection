@@ -1,109 +1,100 @@
-"""
-Streamlit app — Multi-model YOLO + RCNN Video/Audio Inference
-- upload a video
-- sample frames at chosen FPS (timestamps recorded)
-- extract short audio clips around each timestamp (keeps audio inside the video)
-- run 3 YOLO models on frames and draw bounding boxes
-- run 2 RCNN models on audio clips
-- combine detections into a single timeline table and timeline chart
-- preview frames with bounding boxes and play audio clips
-
-Notes:
-- Replace placeholder model-loading lines with your actual model paths/logic.
-- This file is meant to be run with `streamlit run this_file.py` (or in Jupyter via streamlit magic if supported).
-"""
-
+# deploy.py
 import streamlit as st
 import cv2
-import tempfile
 import torch
-import torchaudio
-import librosa
 import numpy as np
 import pandas as pd
-from moviepy import VideoFileClip
-from datetime import timedelta
-from pathlib import Path
-import base64
+import subprocess
+import tempfile
+import os
 import io
+import base64
+import soundfile as sf
+from pathlib import Path
+from datetime import timedelta
 import altair as alt
+import torch.nn as nn
 
-# -------------------------
-# Helpers
-# -------------------------
+# ----------------------------
+# CONFIG (your exact paths)
+# ----------------------------
+YOLO_PATHS = [
+    "./model/ambulance_firetruck_best.pt",
+    "./model/smoke_and_fire_best.pt",
+    "./model/crash_best.pt"
+]
+RCNN_PATHS = [
+    "./model/crash_sound_best.pt",
+    "./model/rcnn_siren_best.pt"
+]
+RCNN_SAMPLE_RATE = 16000   # same sample rate for both RCNN models (you said yes)
+DEFAULT_FPS = 2
+AUDIO_CLIP_SEC = 2
+CONF_THRESH = 0.25
 
+# ----------------------------
+# Utilities
+# ----------------------------
 def format_ts(sec):
     return str(timedelta(seconds=round(sec, 2)))
 
-
-def draw_boxes_on_frame(frame, detections, names=None):
-    """detections: list of dicts {'xyxy': [x1,y1,x2,y2], 'conf': float, 'cls': int, 'label':str}
-    Returns annotated BGR image.
-    """
+def draw_boxes_on_frame(frame, detections):
     img = frame.copy()
-    for det in detections:
-        x1, y1, x2, y2 = map(int, det['xyxy'])
-        conf = det.get('conf', 0)
-        label = det.get('label', str(det.get('cls', '')))
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(img, f"{label} {conf:.2f}", (x1, max(0, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+    for d in detections:
+        x1,y1,x2,y2 = map(int, d['xyxy'])
+        label = d.get('label', '')
+        conf = d.get('conf', 0.0)
+        cv2.rectangle(img, (x1,y1),(x2,y2),(0,255,0),2)
+        cv2.putText(img, f"{label} {conf:.2f}", (x1, max(0,y1-6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
     return img
 
-
-def array_to_audio_bytes(waveform, sr):
-    # waveform: 1D numpy float32 in [-1,1]
-    import soundfile as sf
+def array_to_wav_bytes(waveform, sr):
     bio = io.BytesIO()
     sf.write(bio, waveform, sr, format='WAV')
     bio.seek(0)
     return bio.read()
 
-# -------------------------
-# Model loading (placeholders - replace with your code)
-# -------------------------
-
-@st.cache_resource
-def load_yolo_models():
-    """Replace with your YOLOv12 loading. Examples:
-    - ultralytics: from ultralytics import YOLO; YOLO(path)
-    - torch hub/yolov5: torch.hub.load(...)
+def extract_audio_with_ffmpeg(video_path, out_wav_path, sr=16000):
     """
-    models = []
-    try:
-        from ultralytics import YOLO
-        models.append(YOLO('./model/ambulance_firetruck.pt'))
-        models.append(YOLO('./model/smoke_and_fire_best.pt'))
-        models.append(YOLO('./model/crash_best.pt'))
-    except Exception:
-        # fallback: dummy None list (user must replace)
-        models = [None, None, None]
-    return models
-
-@st.cache_resource
-def load_rcnn_models():
-    # Replace with your RCNN model loading (torch.load or model definition + load_state_dict)
-    models = []
-    try:
-        m1 = torch.load('./model/crash_sound_best.pt', map_location='cpu')
-        m2 = torch.load('./model/rcnn_siren_best.pt', map_location='cpu')
-        m1.eval(); m2.eval()
-        models = [m1, m2]
-    except Exception:
-        models = [None, None]
-    return models
-
-# -------------------------
-# Extraction utilities
-# -------------------------
+    Extract audio from a video to a mono WAV file at the given sample rate.
+    Will try system ffmpeg, otherwise uses imageio-ffmpeg's bundled binary.
+    """
+    import shutil
+    
+    # Try system ffmpeg first
+    ffmpeg_path = shutil.which("ffmpeg")
+    
+    # If not found, fall back to imageio-ffmpeg
+    if ffmpeg_path is None:
+        try:
+            import imageio_ffmpeg as ffmpeg
+            ffmpeg_path = ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            raise RuntimeError(
+                "ffmpeg not found on system and imageio-ffmpeg not installed.\n"
+                "Install it via: pip install imageio-ffmpeg"
+            )
+    
+    cmd = [
+        ffmpeg_path,
+        "-y",               # overwrite output if exists
+        "-i", str(video_path),  # input file
+        "-ac", "1",         # mono audio
+        "-ar", str(sr),     # resample
+        "-vn",              # no video
+        str(out_wav_path)   # output file
+    ]
+    
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 def extract_frames_with_timestamps(video_path, target_fps):
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(str(video_path))
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = max(1, int(round(orig_fps / target_fps)))
     frames = []
     timestamps = []
     idx = 0
-    saved_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -112,35 +103,136 @@ def extract_frames_with_timestamps(video_path, target_fps):
             ts = idx / orig_fps
             frames.append(frame.copy())
             timestamps.append(ts)
-            saved_idx += 1
         idx += 1
     cap.release()
     return frames, timestamps
 
+# Model architecture
+class RCNNClassifier(nn.Module):
+    def __init__(self, n_mels=64, n_classes=3, hidden_size=128):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1), nn.ReLU(),
+            nn.MaxPool2d((2,2)),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1), nn.ReLU(),
+            nn.MaxPool2d((2,2)),
+        )
+        self.lstm = nn.LSTM(input_size=32 * (n_mels // 4), hidden_size=hidden_size, batch_first=True)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, 64), nn.ReLU(),
+            nn.Linear(64, n_classes)
+        )
 
-def extract_audio_waveform_from_video(video_path, sr=16000):
-    # Return mono waveform (numpy float32 in [-1,1]) and sample rate
-    clip = VideoFileClip(video_path)
-    audio = clip.audio
-    arr = audio.to_soundarray(fps=sr)
-    if arr.ndim == 2:
-        arr = arr.mean(axis=1)
-    return arr.astype('float32'), sr
+    def forward(self, x):  # x: (B,1,n_mels,time)
+        x = self.cnn(x)  # (B, C, M', T')
+        B, C, M, T = x.size()
+        x = x.permute(0, 3, 1, 2).contiguous()  # (B, T, C, M)
+        x = x.view(B, T, C * M)  # (B, T, feat)
+        x, _ = self.lstm(x)  # (B, T, hidden)
+        x = x[:, -1, :]  # last timestep
+        out = self.classifier(x)  # (B, n_classes)
+        return out
 
-# -------------------------
-# Inference wrappers
-# -------------------------
+# RCNN model
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+    def forward(self, x): return self.net(x)
 
-def run_yolo_on_frames(frames, models, conf_thres=0.25):
-    all_results = [[ ] for _ in models]
-    for i, model in enumerate(models):
-        if model is None:
-            continue
+class RCNN(nn.Module):
+    def __init__(self, n_classes):
+        super().__init__()
+        self.c1 = ConvBlock(1, 32)
+        self.c2 = ConvBlock(32, 64)
+        self.c3 = ConvBlock(64, 128)
+        self.rnn_input = 128 * (64 // 8)
+        self.rnn = nn.GRU(self.rnn_input, 128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
+        self.fc = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, n_classes))
+
+    def forward(self, x):
+        x = self.c1(x)
+        x = self.c2(x)
+        x = self.c3(x)
+        B, C, M, T = x.shape
+        x = x.permute(0, 3, 1, 2).contiguous().view(B, T, C*M)
+        x, _ = self.rnn(x)
+        x = x.mean(1)
+        return self.fc(x)
+
+# ----------------------------
+# Model load & check helpers
+# ----------------------------
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def check_and_load_models(yolo_paths, rcnn_paths, device):
+    status = {"yolo": [], "rcnn": []}
+    yolo_models = []
+    rcnn_models = []
+
+    # === YOLO Models ===
+    for p in yolo_paths:
+        info = {"path": p, "loaded": False, "error": None}
         try:
-            # ultralytics YOLO supports passing numpy arrays one by one
-            for frame in frames:
-                res = model(frame)
-                # parse res[0].boxes if ultralytics
+            from ultralytics import YOLO
+            m = YOLO(p)
+            yolo_models.append(m)
+            info["loaded"] = True
+        except Exception as e:
+            info["error"] = repr(e)
+            yolo_models.append(None)
+        status["yolo"].append(info)
+
+    # === RCNN Models ===
+    # RCNN Model 1
+    info1 = {"path": rcnn_paths[0], "loaded": False, "error": None}
+    try:
+        m1 = RCNNClassifier(n_mels=64, n_classes=3, hidden_size=128)
+        m1.load_state_dict(torch.load(rcnn_paths[0], map_location=device, weights_only=False))
+        m1.to(device)
+        m1.eval()
+        rcnn_models.append(m1)
+        info1["loaded"] = True
+    except Exception as e:
+        info1["error"] = repr(e)
+        rcnn_models.append(None)
+    status["rcnn"].append(info1)
+
+    # RCNN Model 2
+    info2 = {"path": rcnn_paths[1], "loaded": False, "error": None}
+    try:
+        m2 = torch.load(rcnn_paths[1], map_location=device, weights_only=False)
+        m2.to(device)
+        m2.eval()
+        rcnn_models.append(m2)
+        info2["loaded"] = True
+    except Exception as e:
+        info2["error"] = repr(e)
+        rcnn_models.append(None)
+    status["rcnn"].append(info2)
+
+    return yolo_models, rcnn_models, status
+
+# ----------------------------
+# Inference wrappers
+# ----------------------------
+def run_yolo_on_frames(frames, yolo_models, conf_thres=CONF_THRESH):
+    # returns list per model, each is list per frame -> detections list
+    all_results = []
+    for model in yolo_models:
+        model_results = []
+        if model is None:
+            model_results = [[] for _ in frames]
+            all_results.append(model_results)
+            continue
+        for frame in frames:
+            try:
+                res = model(frame)  # ultralytics YOLO
                 boxes = []
                 try:
                     r0 = res[0]
@@ -148,185 +240,215 @@ def run_yolo_on_frames(frames, models, conf_thres=0.25):
                         for b in r0.boxes.data.tolist():
                             x1,y1,x2,y2,score,cls = b
                             if score >= conf_thres:
-                                boxes.append({'xyxy':[x1,y1,x2,y2],'conf':score,'cls':int(cls),'label':r0.names[int(cls)] if hasattr(r0,'names') else str(int(cls))})
+                                label = r0.names[int(cls)] if hasattr(r0, 'names') else str(int(cls))
+                                boxes.append({'xyxy':[x1,y1,x2,y2],'conf':float(score),'cls':int(cls),'label':label})
                 except Exception:
                     pass
-                all_results[i].append(boxes)
-        except Exception:
-            # fallback for other model APIs (e.g., yolov5 hub models)
-            try:
-                for frame in frames:
-                    results = model(frame)
-                    dets = []
-                    if hasattr(results, 'xyxy'):
-                        for row in results.xyxy[0].cpu().numpy():
-                            x1,y1,x2,y2,conf,cls = row
-                            if conf >= conf_thres:
-                                label = results.names[int(cls)] if hasattr(results, 'names') else str(int(cls))
-                                dets.append({'xyxy':[x1,y1,x2,y2],'conf':float(conf),'cls':int(cls),'label':label})
-                    all_results[i].append(dets)
+                model_results.append(boxes)
             except Exception:
-                # if model can't run, fill with empty lists
-                all_results[i] = [[] for _ in frames]
+                # fallback to empty
+                model_results.append([])
+        all_results.append(model_results)
     return all_results
 
-
-def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, models):
-    results = [[ ] for _ in models]
+def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn_models, device):
+    results = []
     total_len = len(waveform)
-    for idx, ts in enumerate(timestamps):
-        start_sample = int(max(0, (ts - clip_length_sec/2) * sr))
-        end_sample = int(min(total_len, start_sample + clip_length_sec * sr))
-        segment = waveform[start_sample:end_sample]
-        # normalize if needed
-        if segment.size == 0:
-            for j in range(len(models)):
-                results[j].append(None)
-            continue
-        seg_t = torch.tensor(segment).float().unsqueeze(0).unsqueeze(0)  # shape [1,1,N]
-        for j, m in enumerate(models):
-            if m is None:
-                results[j].append(None)
+    for m in rcnn_models:
+        model_res = []
+        for ts in timestamps:
+            start = int(max(0, (ts - clip_length_sec/2) * sr))
+            end = int(min(total_len, start + clip_length_sec * sr))
+            seg = waveform[start:end]
+            if seg.size == 0 or m is None:
+                model_res.append(None)
                 continue
+            t = torch.tensor(seg).float().unsqueeze(0).unsqueeze(0).to(device)  # [1,1,N]
             with torch.no_grad():
                 try:
-                    out = m(seg_t)
-                    if isinstance(out, (list, tuple)):
+                    out = m(t)
+                    if isinstance(out, (list,tuple)):
                         out = out[0]
                     probs = torch.softmax(out, dim=1).cpu().numpy()[0]
                     pred = int(np.argmax(probs))
-                    results[j].append({'pred': pred, 'probs': probs.tolist()})
+                    model_res.append({'pred': pred, 'probs': probs.tolist()})
                 except Exception:
-                    # try other output shapes (binary)
+                    # try other output shapes
                     try:
-                        out = m(seg_t).cpu().numpy()
+                        out = m(t).cpu().numpy()
                         if out.size == 1:
                             prob = float(out)
-                            pred = int(prob > 0.5)
-                            results[j].append({'pred': pred, 'probs':[1-prob, prob]})
+                            pred = int(prob>0.5)
+                            model_res.append({'pred':pred, 'probs':[1-prob, prob]})
                         else:
                             pred = int(np.argmax(out))
-                            results[j].append({'pred': pred, 'probs': out.tolist()})
+                            model_res.append({'pred':pred, 'probs': out.tolist()})
                     except Exception:
-                        results[j].append(None)
+                        model_res.append(None)
+        results.append(model_res)
     return results
 
-# -------------------------
-# Streamlit UI
-# -------------------------
+# ----------------------------
+# Streamlit app UI
+# ----------------------------
+st.set_page_config(layout="wide", page_title="Multi-model YOLO + RCNN Inference")
+st.title("Multi-model YOLO + RCNN Video/Audio Inference")
 
-st.title("Multi-Model Video + Audio Inference (YOLO + RCNN)")
-st.write("Upload a video, pick FPS and audio clip length. The app will run 3 YOLO models on frames and 2 RCNN models on audio segments and show a combined timeline.")
+col_l, col_r = st.columns([1,2])
+with col_l:
+    st.header("Config")
+    target_fps = st.number_input("Frame sampling FPS", min_value=1, max_value=30, value=DEFAULT_FPS)
+    audio_clip_len = st.number_input("Audio clip length (s)", min_value=1, max_value=10, value=AUDIO_CLIP_SEC)
+    conf_thresh = st.slider("YOLO confidence threshold", min_value=0.0, max_value=1.0, value=CONF_THRESH)
+    device = get_device()
+    st.write("Device:", device)
 
-uploaded = st.file_uploader("Upload video (.mp4, .mov, .avi)", type=['mp4','mov','avi','mkv'])
-col1, col2 = st.columns(2)
-with col1:
-    target_fps = st.number_input("Frame sampling FPS", min_value=1, max_value=30, value=2)
-with col2:
-    audio_clip_len = st.number_input("Audio clip length (sec)", min_value=1, max_value=10, value=2)
+with col_r:
+    st.header("Models")
+    st.write("YOLO model paths (3):")
+    for p in YOLO_PATHS: st.write("-", p)
+    st.write("RCNN model paths (2):")
+    for p in RCNN_PATHS: st.write("-", p)
+    st.write(f"RCNN sample rate: {RCNN_SAMPLE_RATE} Hz (shared)")
 
-if uploaded is not None:
-    tmp = Path(tempfile.gettempdir()) / uploaded.name
-    with open(tmp, 'wb') as f:
-        f.write(uploaded.read())
+st.markdown("---")
+uploaded = st.file_uploader("Upload video (.mp4 .mov .avi .mkv)", type=['mp4','mov','avi','mkv'])
 
-    st.video(str(tmp))
+if uploaded is None:
+    st.info("Upload a video file to run inference.")
+    st.stop()
 
-    with st.spinner('Extracting frames and audio...'):
-        frames, frame_timestamps = extract_frames_with_timestamps(str(tmp), target_fps)
-        waveform, sr = extract_audio_waveform_from_video(str(tmp), sr=16000)
+# save uploaded temp file
+tmp_video = Path(tempfile.gettempdir()) / uploaded.name
+with open(tmp_video, "wb") as f:
+    f.write(uploaded.read())
 
-    st.success(f"Extracted {len(frames)} frames and audio (sr={sr}).")
+st.video(str(tmp_video))
 
-    # Load models
-    yolo_models = load_yolo_models()
-    rcnn_models = load_rcnn_models()
+# load models and show load status
+with st.spinner("Loading models / checking status..."):
+    yolo_models, rcnn_models, load_status = check_and_load_models(YOLO_PATHS, RCNN_PATHS, device)
+st.subheader("Model load status")
+cols = st.columns(2)
+with cols[0]:
+    st.write("YOLO models")
+    for s in load_status["yolo"]:
+        if s["loaded"]:
+            st.success(f"Loaded: {s['path']}")
+        else:
+            st.error(f"Failed: {s['path']} — {s['error']}")
+with cols[1]:
+    st.write("RCNN models")
+    for s in load_status["rcnn"]:
+        if s["loaded"]:
+            st.success(f"Loaded: {s['path']}")
+        else:
+            st.error(f"Failed: {s['path']} — {s['error']}")
 
-    # Run inference
-    with st.spinner('Running YOLO models on frames...'):
-        yolo_all = run_yolo_on_frames(frames, yolo_models)
+# extract frames
+with st.spinner("Extracting frames..."):
+    frames, frame_timestamps = extract_frames_with_timestamps(str(tmp_video), target_fps)
+st.success(f"Extracted {len(frames)} frames")
 
-    with st.spinner('Running RCNN models on audio around each timestamp...'):
-        rcnn_all = run_rcnn_on_audio_timestamps(waveform, sr, frame_timestamps, audio_clip_len, rcnn_models)
-
-    # Build a combined DataFrame timeline
-    rows = []
-    # Vision detections
-    for mi, model_results in enumerate(yolo_all):
-        for fi, dets in enumerate(model_results):
-            ts = frame_timestamps[fi]
-            if dets:
-                for d in dets:
-                    rows.append({
-                        'timestamp': ts,
-                        'time_str': format_ts(ts),
-                        'source': f'YOLO_{mi+1}',
-                        'type': 'vision',
-                        'label': d.get('label', ''),
-                        'confidence': d.get('conf', 0.0)
-                    })
-    # Audio detections
-    for mi, model_results in enumerate(rcnn_all):
-        for fi, res in enumerate(model_results):
-            ts = frame_timestamps[fi]
-            if res is not None:
-                rows.append({
-                    'timestamp': ts,
-                    'time_str': format_ts(ts),
-                    'source': f'RCNN_{mi+1}',
-                    'type': 'audio',
-                    'label': str(res.get('pred', '')),
-                    'confidence': max(res.get('probs', [0])) if res.get('probs') is not None else 0.0
-                })
-
-    if not rows:
-        st.info('No detections from any model (or models not loaded).')
+# extract audio (resample once to RCNN_SAMPLE_RATE)
+with st.spinner("Extracting and resampling audio with ffmpeg..."):
+    tmp_wav = Path(tempfile.gettempdir()) / (tmp_video.stem + f"_sr{RCNN_SAMPLE_RATE}.wav")
+    try:
+        extract_audio_with_ffmpeg(tmp_video, tmp_wav, sr=RCNN_SAMPLE_RATE)
+    except Exception as e:
+        st.error(f"ffmpeg audio extraction failed: {e}")
+        st.stop()
+    sf_read = lambda p: sf.read(p)  # define shortcut function
+    waveform, sr = sf_read(tmp_wav)
+    # soundfile returns (data, sr), ensure mono float32
+    if isinstance(waveform, tuple):
+        arr, sr = waveform
     else:
-        df = pd.DataFrame(rows)
-        df_sorted = df.sort_values('timestamp')
+        arr, sr = waveform, RCNN_SAMPLE_RATE
+    if arr.ndim == 2:
+        arr = arr.mean(axis=1)
+    waveform = arr.astype('float32')
 
-        st.subheader('Combined timeline (table)')
-        st.dataframe(df_sorted.reset_index(drop=True))
+st.success(f"Audio ready (sr={sr}, len={len(waveform)} samples)")
 
-        st.subheader('Timeline chart')
-        base = alt.Chart(df_sorted).encode(x=alt.X('timestamp:Q', title='Time (s)'))
-        points = base.mark_point(filled=True, size=100).encode(
-            y=alt.Y('source:N', title='Model'),
-            color='type:N',
-            tooltip=['time_str', 'source', 'type', 'label', 'confidence']
-        )
-        st.altair_chart(points, use_container_width=True)
+# run YOLO
+with st.spinner("Running YOLO models on frames..."):
+    yolo_all = run_yolo_on_frames(frames, yolo_models, conf_thres=conf_thresh)
+st.success("YOLO done")
 
-        # show preview frames with bounding boxes for the first N detections
-        st.subheader('Preview annotated frames')
-        preview_n = st.slider('How many annotated frames to preview', min_value=1, max_value=min(10, len(frame_timestamps)), value=3)
-        shown = 0
-        for fi, ts in enumerate(frame_timestamps):
-            # collect all detections for this frame across models
-            dets_for_frame = []
-            for mi in range(len(yolo_all)):
-                dets_for_frame += yolo_all[mi][fi] if fi < len(yolo_all[mi]) else []
-            if dets_for_frame:
-                ann = draw_boxes_on_frame(frames[fi], dets_for_frame)
-                st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), caption=f"Annotated @ {format_ts(ts)}", use_column_width=True)
-                # play audio clip for this timestamp
-                start_s = max(0, ts - audio_clip_len/2)
-                end_s = min((len(waveform)/sr), start_s + audio_clip_len)
-                seg = waveform[int(start_s*sr):int(end_s*sr)]
-                audio_bytes = array_to_audio_bytes(seg, sr)
-                st.audio(audio_bytes)
-                shown += 1
-                if shown >= preview_n:
-                    break
+# run RCNN
+with st.spinner("Running RCNN models on audio around each frame timestamp..."):
+    rcnn_all = run_rcnn_on_audio_timestamps(waveform, sr, frame_timestamps, audio_clip_len, rcnn_models, device)
+st.success("RCNN done")
 
-        # allow CSV download
-        csv = df_sorted.to_csv(index=False).encode('utf-8')
-        b64 = base64.b64encode(csv).decode()
-        href = f"data:file/csv;base64,{b64}"
-        st.markdown(f"[Download timeline CSV]({href})")
+# build combined timeline
+rows = []
+# vision
+for mi, model_results in enumerate(yolo_all):
+    for fi, dets in enumerate(model_results):
+        ts = frame_timestamps[fi]
+        if dets:
+            for d in dets:
+                rows.append({
+                    "timestamp": ts,
+                    "time_str": format_ts(ts),
+                    "source": f"YOLO_{mi+1}",
+                    "type": "vision",
+                    "label": d.get("label",""),
+                    "confidence": d.get("conf", 0.0)
+                })
+# audio
+for mi, model_results in enumerate(rcnn_all):
+    for fi, res in enumerate(model_results):
+        ts = frame_timestamps[fi]
+        if res is not None:
+            rows.append({
+                "timestamp": ts,
+                "time_str": format_ts(ts),
+                "source": f"RCNN_{mi+1}",
+                "type": "audio",
+                "label": str(res.get("pred","")),
+                "confidence": max(res.get("probs",[0])) if res.get("probs") is not None else 0.0
+            })
 
-    st.markdown('----')
-    st.write('Tips:')
-    st.write('- If models are large, run the app on a machine with GPU and adjust model `.to(device)` lines.')
-    st.write('- Increase `Frame sampling FPS` to get finer temporal resolution but it will increase compute.')
-    st.write('- Increase `Audio clip length` if events are longer than the sampled instant.')
+if not rows:
+    st.info("No detections found (or models not loaded).")
+else:
+    df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+    st.subheader("Combined timeline (table)")
+    st.dataframe(df)
+
+    st.subheader("Timeline chart")
+    chart = alt.Chart(df).mark_point(filled=True, size=100).encode(
+        x=alt.X("timestamp:Q", title="Time (s)"),
+        y=alt.Y("source:N", title="Model"),
+        color="type:N",
+        tooltip=["time_str", "source", "type", "label", "confidence"]
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    st.subheader("Annotated frame previews with audio")
+    preview_n = st.slider("How many annotated frames to preview", 1, min(10, len(frame_timestamps)), 3)
+    shown = 0
+    for fi, ts in enumerate(frame_timestamps):
+        # collect all detections across YOLO models for this frame
+        dets_for_frame = []
+        for mi in range(len(yolo_all)):
+            if fi < len(yolo_all[mi]):
+                dets_for_frame += yolo_all[mi][fi]
+        if dets_for_frame:
+            ann = draw_boxes_on_frame(frames[fi], dets_for_frame)
+            st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), caption=f"Annotated @ {format_ts(ts)}", use_column_width=True)
+            # audio clip
+            s = int(max(0, (ts - audio_clip_len/2) * sr))
+            e = int(min(len(waveform), s + audio_clip_len * sr))
+            seg = waveform[s:e]
+            if seg.size > 0:
+                st.audio(array_to_wav_bytes(seg, sr))
+            shown += 1
+            if shown >= preview_n:
+                break
+
+    csv = df.to_csv(index=False).encode("utf-8")
+    b64 = base64.b64encode(csv).decode()
+    st.markdown(f"[Download timeline CSV](data:file/csv;base64,{b64})")
