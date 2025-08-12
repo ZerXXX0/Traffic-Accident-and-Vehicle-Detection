@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import timedelta
 import altair as alt
 import torch.nn as nn
+import torchaudio
 
 # ----------------------------
 # CONFIG (your exact paths)
@@ -222,7 +223,6 @@ def check_and_load_models(yolo_paths, rcnn_paths, device):
 # Inference wrappers
 # ----------------------------
 def run_yolo_on_frames(frames, yolo_models, conf_thres=CONF_THRESH):
-    # returns list per model, each is list per frame -> detections list
     all_results = []
     for model in yolo_models:
         model_results = []
@@ -230,28 +230,34 @@ def run_yolo_on_frames(frames, yolo_models, conf_thres=CONF_THRESH):
             model_results = [[] for _ in frames]
             all_results.append(model_results)
             continue
+
         for frame in frames:
             try:
-                res = model(frame)  # ultralytics YOLO
+                res = model.predict(frame, conf=conf_thres, verbose=False)
                 boxes = []
-                try:
-                    r0 = res[0]
-                    if hasattr(r0, 'boxes'):
-                        for b in r0.boxes.data.tolist():
-                            x1,y1,x2,y2,score,cls = b
-                            if score >= conf_thres:
-                                label = r0.names[int(cls)] if hasattr(r0, 'names') else str(int(cls))
-                                boxes.append({'xyxy':[x1,y1,x2,y2],'conf':float(score),'cls':int(cls),'label':label})
-                except Exception:
-                    pass
+                if len(res) > 0 and hasattr(res[0], 'boxes'):
+                    names = res[0].names  # class names dict
+                    for b in res[0].boxes.data.tolist():
+                        x1, y1, x2, y2, score, cls = b
+                        label = names.get(int(cls), str(int(cls)))
+                        boxes.append({
+                            'xyxy': [x1, y1, x2, y2],
+                            'conf': float(score),
+                            'cls': int(cls),
+                            'label': label
+                        })
                 model_results.append(boxes)
-            except Exception:
-                # fallback to empty
+            except Exception as e:
+                print(f"YOLO inference error: {e}")
                 model_results.append([])
         all_results.append(model_results)
     return all_results
 
 def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn_models, device):
+    mel_transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sr,
+        n_mels=64
+    ).to(device)
     results = []
     total_len = len(waveform)
     for m in rcnn_models:
@@ -263,28 +269,17 @@ def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn
             if seg.size == 0 or m is None:
                 model_res.append(None)
                 continue
-            t = torch.tensor(seg).float().unsqueeze(0).unsqueeze(0).to(device)  # [1,1,N]
+
+            seg_tensor = torch.tensor(seg).float().to(device)
+            mel_spec = mel_transform(seg_tensor)  # (n_mels, time)
+            mel_spec = mel_spec.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, n_mels, time)
+
             with torch.no_grad():
-                try:
-                    out = m(t)
-                    if isinstance(out, (list,tuple)):
-                        out = out[0]
-                    probs = torch.softmax(out, dim=1).cpu().numpy()[0]
-                    pred = int(np.argmax(probs))
-                    model_res.append({'pred': pred, 'probs': probs.tolist()})
-                except Exception:
-                    # try other output shapes
-                    try:
-                        out = m(t).cpu().numpy()
-                        if out.size == 1:
-                            prob = float(out)
-                            pred = int(prob>0.5)
-                            model_res.append({'pred':pred, 'probs':[1-prob, prob]})
-                        else:
-                            pred = int(np.argmax(out))
-                            model_res.append({'pred':pred, 'probs': out.tolist()})
-                    except Exception:
-                        model_res.append(None)
+                out = m(mel_spec)
+                probs = torch.softmax(out, dim=1).cpu().numpy()[0]
+                pred = int(np.argmax(probs))
+                model_res.append({'pred': pred, 'probs': probs.tolist()})
+
         results.append(model_res)
     return results
 
