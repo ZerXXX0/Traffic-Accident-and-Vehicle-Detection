@@ -387,6 +387,21 @@ with st.spinner("Running RCNN models on audio around each frame timestamp..."):
     rcnn_all = run_rcnn_on_audio_timestamps(waveform, sr, frame_timestamps, audio_clip_len, rcnn_models, device)
 st.success("RCNN done")
 
+# Label mappings
+YOLO_SOURCES = {
+    0: "ambulance and fire truck detection vision",
+    1: "smoke and fire detection",
+    2: "crash detection vision"
+}
+YOLO2_LABELS = {0: "Smoke", 1: "Fire"}
+
+RCNN_SOURCES = {
+    0: "crash detection sound",
+    1: "ambulance and fire truck detection sound"
+}
+RCNN1_LABELS = {0: "Skid", 1: "Crash", 2: "Background"}
+RCNN2_LABELS = {0: "Ambulance", 1: "Fire Truck", 2: "Police"}
+
 # build combined timeline
 rows = []
 # vision
@@ -395,12 +410,16 @@ for mi, model_results in enumerate(yolo_all):
         ts = frame_timestamps[fi]
         if dets:
             for d in dets:
+                label = d.get("label", "")
+                # Apply YOLO_2 label remapping
+                if mi == 1 and "cls" in d and d["cls"] in YOLO2_LABELS:
+                    label = YOLO2_LABELS[d["cls"]]
                 rows.append({
                     "timestamp": ts,
                     "time_str": format_ts(ts),
-                    "source": f"YOLO_{mi+1}",
+                    "source": YOLO_SOURCES[mi],
                     "type": "vision",
-                    "label": d.get("label",""),
+                    "label": label,
                     "confidence": d.get("conf", 0.0)
                 })
 # audio
@@ -408,14 +427,23 @@ for mi, model_results in enumerate(rcnn_all):
     for fi, res in enumerate(model_results):
         ts = frame_timestamps[fi]
         if res is not None:
+            pred = res.get("pred", "")
+            probs = res.get("probs", [0])
+            label = str(pred)
+            # Apply RCNN label remapping
+            if mi == 0 and pred in RCNN1_LABELS:
+                label = RCNN1_LABELS[pred]
+            elif mi == 1 and pred in RCNN2_LABELS:
+                label = RCNN2_LABELS[pred]
             rows.append({
                 "timestamp": ts,
                 "time_str": format_ts(ts),
-                "source": f"RCNN_{mi+1}",
+                "source": RCNN_SOURCES[mi],
                 "type": "audio",
-                "label": str(res.get("pred","")),
-                "confidence": max(res.get("probs",[0])) if res.get("probs") is not None else 0.0
+                "label": label,
+                "confidence": max(probs) if probs else 0.0
             })
+
 
 if not rows:
     st.info("No detections found (or models not loaded).")
