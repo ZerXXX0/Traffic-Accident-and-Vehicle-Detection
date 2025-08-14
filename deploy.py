@@ -435,6 +435,11 @@ for mi, model_results in enumerate(rcnn_all):
                 label = RCNN1_LABELS[pred]
             elif mi == 1 and pred in RCNN2_LABELS:
                 label = RCNN2_LABELS[pred]
+            
+            # 🚫 Skip background
+            if label.lower() == "background":
+                continue
+
             rows.append({
                 "timestamp": ts,
                 "time_str": format_ts(ts),

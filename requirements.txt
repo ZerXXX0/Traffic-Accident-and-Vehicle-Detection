@@ -1,0 +1,11 @@
+streamlit
+opencv-python
+torch
+torchaudio
+numpy
+pandas
+soundfile
+ultralytics
+altair
+imageio-ffmpeg
+torchvision
