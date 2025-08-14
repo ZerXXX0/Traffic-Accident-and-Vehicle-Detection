@@ -404,6 +404,7 @@ RCNN2_LABELS = {0: "Ambulance", 1: "Fire Truck", 2: "Police"}
 
 # build combined timeline
 rows = []
+jam = []
 # vision
 for mi, model_results in enumerate(yolo_all):
     for fi, dets in enumerate(model_results):
@@ -414,6 +415,18 @@ for mi, model_results in enumerate(yolo_all):
                 # Apply YOLO_2 label remapping
                 if mi == 1 and "cls" in d and d["cls"] in YOLO2_LABELS:
                     label = YOLO2_LABELS[d["cls"]]
+
+                if label.lower() == "vehicle":
+                    jam.append({
+                        "timestamp": ts,
+                        "time_str": format_ts(ts),
+                        "source": YOLO_SOURCES[mi],
+                        "type": "vision",
+                        "label": label,
+                        "confidence": d.get("conf", 0.0)
+                    })
+                    continue
+
                 rows.append({
                     "timestamp": ts,
                     "time_str": format_ts(ts),
@@ -436,7 +449,7 @@ for mi, model_results in enumerate(rcnn_all):
             elif mi == 1 and pred in RCNN2_LABELS:
                 label = RCNN2_LABELS[pred]
             
-            # 🚫 Skip background
+            # Skip background
             if label.lower() == "background":
                 continue
 
@@ -487,6 +500,48 @@ else:
             shown += 1
             if shown >= preview_n:
                 break
+
+# =======================
+# VEHICLE DETECTION TABLE
+# =======================
+if not jam:
+    st.info("No vehicle found (or models not loaded).")
+else:
+    # Convert to DataFrame
+    jam_df = pd.DataFrame(jam).sort_values("timestamp").reset_index(drop=True)
+
+    # Count vehicles per timestamp
+    vehicle_counts = jam_df.groupby("timestamp").size().reset_index(name="vehicle_count")
+
+    # Classify traffic condition
+    def classify_traffic(count):
+        if 0 <= count <= 5:
+            return "empty"
+        elif 6 <= count <= 10:
+            return "fluid"
+        elif 11 <= count <= 15:
+            return "moderate"
+        elif 16 <= count <= 20:
+            return "heavy"
+        else:  # count >= 21
+            return "jam"
+
+    vehicle_counts["traffic_condition"] = vehicle_counts["vehicle_count"].apply(classify_traffic)
+
+    # Merge classification back into jam_df
+    jam_df = jam_df.merge(vehicle_counts, on="timestamp", how="left")
+
+    st.subheader("Vehicle Detection Timeline")
+    st.dataframe(jam_df)
+
+    st.subheader("Vehicle Timeline Chart")
+    jam_chart = alt.Chart(jam_df).mark_point(filled=True, size=100).encode(
+        x=alt.X("timestamp:Q", title="Time (s)"),
+        y=alt.Y("traffic_condition:N", title="Traffic Condition"),
+        color=alt.Color("vehicle_count:Q", title="Vehicle Count", scale=alt.Scale(scheme="reds")),
+        tooltip=["time_str", "vehicle_count", "traffic_condition", "confidence"]
+    )
+    st.altair_chart(jam_chart, use_container_width=True)
 
     csv = df.to_csv(index=False).encode("utf-8")
     b64 = base64.b64encode(csv).decode()
