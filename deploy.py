@@ -1,101 +1,129 @@
-# deploy.py
+"""
+Streamlit app — Multi-model YOLO + RCNN Video/Audio Inference
+- upload a video
+- sample frames at chosen FPS (timestamps recorded)
+- extract short audio clips around each timestamp (keeps audio inside the video)
+- run 3 YOLO models on frames and draw bounding boxes
+- run 2 RCNN models on audio clips
+- combine detections into a single timeline table and timeline chart
+- preview frames with bounding boxes and play audio clips
+
+Notes:
+- Replace placeholder model-loading lines with your actual model paths/logic.
+- This file is meant to be run with `streamlit run this_file.py` (or in Jupyter via streamlit magic if supported).
+"""
+
 import streamlit as st
 import cv2
+import tempfile
 import torch
+import torchaudio
+import librosa
 import numpy as np
 import pandas as pd
-import subprocess
-import tempfile
-import os
-import io
-import base64
-import soundfile as sf
-from pathlib import Path
+from moviepy import VideoFileClip
 from datetime import timedelta
+from pathlib import Path
+import base64
+import io
 import altair as alt
-import torch.nn as nn
-import torchaudio
+import streamlit.components.v1 as components
 
-# ----------------------------
-# CONFIG (your exact paths)
-# ----------------------------
-YOLO_PATHS = [
-    "./model/ambulance_firetruck_best.pt",
-    "./model/smoke_and_fire_best.pt",
-    "./model/crash_best.pt"
-]
-RCNN_PATHS = [
-    "./model/crash_sound_best.pt",
-    "./model/rcnn_siren_best.pt"
-]
-RCNN_SAMPLE_RATE = 16000   # same sample rate for both RCNN models (you said yes)
-DEFAULT_FPS = 2
-AUDIO_CLIP_SEC = 2
-CONF_THRESH = 0.25
+# -------------------------
+# Helpers
+# -------------------------
 
-# ----------------------------
-# Utilities
-# ----------------------------
 def format_ts(sec):
     return str(timedelta(seconds=round(sec, 2)))
 
-def draw_boxes_on_frame(frame, detections):
+
+def draw_boxes_on_frame(frame, detections, names=None):
+    """detections: list of dicts {'xyxy': [x1,y1,x2,y2], 'conf': float, 'cls': int, 'label':str}
+    Returns annotated BGR image.
+    """
     img = frame.copy()
-    for d in detections:
-        x1,y1,x2,y2 = map(int, d['xyxy'])
-        label = d.get('label', '')
-        conf = d.get('conf', 0.0)
-        cv2.rectangle(img, (x1,y1),(x2,y2),(0,255,0),2)
-        cv2.putText(img, f"{label} {conf:.2f}", (x1, max(0,y1-6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det['xyxy'])
+        conf = det.get('conf', 0)
+        label = det.get('label', str(det.get('cls', '')))
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(img, f"{label} {conf:.2f}", (x1, max(0, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
     return img
 
-def array_to_wav_bytes(waveform, sr):
+
+def array_to_audio_bytes(waveform, sr):
+    # waveform: 1D numpy float32 in [-1,1]
+    import soundfile as sf
     bio = io.BytesIO()
     sf.write(bio, waveform, sr, format='WAV')
     bio.seek(0)
     return bio.read()
 
-def extract_audio_with_ffmpeg(video_path, out_wav_path, sr=16000):
-    """
-    Extract audio from a video to a mono WAV file at the given sample rate.
-    Will try system ffmpeg, otherwise uses imageio-ffmpeg's bundled binary.
-    """
-    import shutil
-    
-    # Try system ffmpeg first
-    ffmpeg_path = shutil.which("ffmpeg")
-    
-    # If not found, fall back to imageio-ffmpeg
-    if ffmpeg_path is None:
-        try:
-            import imageio_ffmpeg as ffmpeg
-            ffmpeg_path = ffmpeg.get_ffmpeg_exe()
-        except ImportError:
-            raise RuntimeError(
-                "ffmpeg not found on system and imageio-ffmpeg not installed.\n"
-                "Install it via: pip install imageio-ffmpeg"
-            )
-    
-    cmd = [
-        ffmpeg_path,
-        "-y",               # overwrite output if exists
-        "-i", str(video_path),  # input file
-        "-ac", "1",         # mono audio
-        "-ar", str(sr),     # resample
-        "-vn",              # no video
-        str(out_wav_path)   # output file
+# -------------------------
+# Model loading (placeholders - replace with your code)
+# -------------------------
+
+@st.cache_resource
+def load_yolo_models():
+    """Load YOLO models with proper error handling and debugging"""
+    models = []
+    model_paths = [
+        './model/ambulance_firetruck_best.pt',  # Fixed path
+        './model/smoke_and_fire_best.pt',
+        './model/crash_best.pt'
     ]
     
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    for i, path in enumerate(model_paths):
+        try:
+            from ultralytics import YOLO
+            model = YOLO(path)
+            models.append(model)
+            st.write(f"✅ Model {i+1} loaded successfully: {path}")
+        except FileNotFoundError:
+            st.error(f"❌ Model file not found: {path}")
+            models.append(None)
+        except Exception as e:
+            st.error(f"❌ Error loading model {i+1}: {str(e)}")
+            models.append(None)
+    
+    return models
+
+@st.cache_resource
+def load_rcnn_models():
+    """Load RCNN models with proper error handling and debugging"""
+    models = []
+    model_paths = [
+        './model/crash_sound_best.pt',
+        './model/rcnn_siren_best.pt'
+    ]
+    
+    for i, path in enumerate(model_paths):
+        try:
+            model = torch.load(path, map_location='cpu')
+            model.eval()
+            models.append(model)
+            st.write(f"✅ Audio Model {i+1} loaded successfully: {path}")
+        except FileNotFoundError:
+            st.error(f"❌ Audio model file not found: {path}")
+            models.append(None)
+        except Exception as e:
+            st.error(f"❌ Error loading audio model {i+1}: {str(e)}")
+            models.append(None)
+    
+    return models
+
+# -------------------------
+# Extraction utilities
+# -------------------------
 
 def extract_frames_with_timestamps(video_path, target_fps):
-    cap = cv2.VideoCapture(str(video_path))
+    cap = cv2.VideoCapture(video_path)
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = max(1, int(round(orig_fps / target_fps)))
     frames = []
     timestamps = []
     idx = 0
+    saved_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -104,445 +132,682 @@ def extract_frames_with_timestamps(video_path, target_fps):
             ts = idx / orig_fps
             frames.append(frame.copy())
             timestamps.append(ts)
+            saved_idx += 1
         idx += 1
     cap.release()
     return frames, timestamps
 
-# Model architecture
-class RCNNClassifier(nn.Module):
-    def __init__(self, n_mels=64, n_classes=3, hidden_size=128):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1), nn.ReLU(),
-            nn.MaxPool2d((2,2)),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1), nn.ReLU(),
-            nn.MaxPool2d((2,2)),
-        )
-        self.lstm = nn.LSTM(input_size=32 * (n_mels // 4), hidden_size=hidden_size, batch_first=True)
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, 64), nn.ReLU(),
-            nn.Linear(64, n_classes)
-        )
 
-    def forward(self, x):  # x: (B,1,n_mels,time)
-        x = self.cnn(x)  # (B, C, M', T')
-        B, C, M, T = x.size()
-        x = x.permute(0, 3, 1, 2).contiguous()  # (B, T, C, M)
-        x = x.view(B, T, C * M)  # (B, T, feat)
-        x, _ = self.lstm(x)  # (B, T, hidden)
-        x = x[:, -1, :]  # last timestep
-        out = self.classifier(x)  # (B, n_classes)
-        return out
+def extract_audio_waveform_from_video(video_path, sr=16000):
+    # Return mono waveform (numpy float32 in [-1,1]) and sample rate
+    clip = VideoFileClip(video_path)
+    audio = clip.audio
+    arr = audio.to_soundarray(fps=sr)
+    if arr.ndim == 2:
+        arr = arr.mean(axis=1)
+    return arr.astype('float32'), sr
 
-# RCNN model
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-    def forward(self, x): return self.net(x)
-
-class RCNN(nn.Module):
-    def __init__(self, n_classes):
-        super().__init__()
-        self.c1 = ConvBlock(1, 32)
-        self.c2 = ConvBlock(32, 64)
-        self.c3 = ConvBlock(64, 128)
-        self.rnn_input = 128 * (64 // 8)
-        self.rnn = nn.GRU(self.rnn_input, 128, num_layers=2, batch_first=True, bidirectional=True, dropout=0.3)
-        self.fc = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, n_classes))
-
-    def forward(self, x):
-        x = self.c1(x)
-        x = self.c2(x)
-        x = self.c3(x)
-        B, C, M, T = x.shape
-        x = x.permute(0, 3, 1, 2).contiguous().view(B, T, C*M)
-        x, _ = self.rnn(x)
-        x = x.mean(1)
-        return self.fc(x)
-
-# ----------------------------
-# Model load & check helpers
-# ----------------------------
-def get_device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def check_and_load_models(yolo_paths, rcnn_paths, device):
-    status = {"yolo": [], "rcnn": []}
-    yolo_models = []
-    rcnn_models = []
-
-    # === YOLO Models ===
-    for p in yolo_paths:
-        info = {"path": p, "loaded": False, "error": None}
-        try:
-            from ultralytics import YOLO
-            m = YOLO(p)
-            yolo_models.append(m)
-            info["loaded"] = True
-        except Exception as e:
-            info["error"] = repr(e)
-            yolo_models.append(None)
-        status["yolo"].append(info)
-
-    # === RCNN Models ===
-    # RCNN Model 1
-    info1 = {"path": rcnn_paths[0], "loaded": False, "error": None}
-    try:
-        m1 = RCNNClassifier(n_mels=64, n_classes=3, hidden_size=128)
-        m1.load_state_dict(torch.load(rcnn_paths[0], map_location=device, weights_only=False))
-        m1.to(device)
-        m1.eval()
-        rcnn_models.append(m1)
-        info1["loaded"] = True
-    except Exception as e:
-        info1["error"] = repr(e)
-        rcnn_models.append(None)
-    status["rcnn"].append(info1)
-
-    # RCNN Model 2
-    info2 = {"path": rcnn_paths[1], "loaded": False, "error": None}
-    try:
-        m2 = torch.load(rcnn_paths[1], map_location=device, weights_only=False)
-        m2.to(device)
-        m2.eval()
-        rcnn_models.append(m2)
-        info2["loaded"] = True
-    except Exception as e:
-        info2["error"] = repr(e)
-        rcnn_models.append(None)
-    status["rcnn"].append(info2)
-
-    return yolo_models, rcnn_models, status
-
-# ----------------------------
+# -------------------------
 # Inference wrappers
-# ----------------------------
-def run_yolo_on_frames(frames, yolo_models, conf_thres=CONF_THRESH):
-    all_results = []
-    for model in yolo_models:
-        model_results = []
-        if model is None:
-            model_results = [[] for _ in frames]
-            all_results.append(model_results)
-            continue
+# -------------------------
 
-        for frame in frames:
-            try:
-                res = model.predict(frame, conf=conf_thres, verbose=False)
+def run_yolo_on_frames(frames, models, conf_thres=0.25):
+    """Enhanced YOLO inference with debugging and lower confidence threshold"""
+    all_results = [[] for _ in models]
+    
+    for i, model in enumerate(models):
+        if model is None:
+            st.warning(f"⚠️ Model {i+1} is None, skipping...")
+            all_results[i] = [[] for _ in frames]
+            continue
+            
+        try:
+            st.write(f"🔍 Running Model {i+1} on {len(frames)} frames...")
+            frame_count = 0
+            
+            for frame_idx, frame in enumerate(frames):
+                # Ensure frame is in correct format (BGR for YOLO)
+                if frame is None:
+                    all_results[i].append([])
+                    continue
+                    
+                # Run inference with lower confidence for debugging
+                res = model(frame, conf=max(0.1, conf_thres-0.1), verbose=False)
                 boxes = []
-                if len(res) > 0 and hasattr(res[0], 'boxes'):
-                    names = res[0].names  # class names dict
-                    for b in res[0].boxes.data.tolist():
-                        x1, y1, x2, y2, score, cls = b
-                        label = names.get(int(cls), str(int(cls)))
-                        boxes.append({
-                            'xyxy': [x1, y1, x2, y2],
-                            'conf': float(score),
-                            'cls': int(cls),
-                            'label': label
-                        })
-                model_results.append(boxes)
-            except Exception as e:
-                print(f"YOLO inference error: {e}")
-                model_results.append([])
-        all_results.append(model_results)
+                
+                try:
+                    r0 = res[0]
+                    if hasattr(r0, 'boxes') and r0.boxes is not None:
+                        for b in r0.boxes.data.tolist():
+                            if len(b) >= 6:  # Ensure we have all required values
+                                x1, y1, x2, y2, score, cls = b[:6]
+                                if score >= conf_thres:
+                                    label = r0.names[int(cls)] if hasattr(r0, 'names') and int(cls) in r0.names else f"class_{int(cls)}"
+                                    boxes.append({
+                                        'xyxy': [x1, y1, x2, y2],
+                                        'conf': score,
+                                        'cls': int(cls),
+                                        'label': label
+                                    })
+                                    frame_count += 1
+                except Exception as e:
+                    st.error(f"❌ Error parsing results for Model {i+1}, Frame {frame_idx}: {str(e)}")
+                
+                all_results[i].append(boxes)
+            
+            st.write(f"✅ Model {i+1}: Found {frame_count} detections across {len(frames)} frames")
+            
+        except Exception as e:
+            st.error(f"❌ Critical error in Model {i+1}: {str(e)}")
+            all_results[i] = [[] for _ in frames]
+    
     return all_results
 
-def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, rcnn_models, device):
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sr,
-        n_mels=64
-    ).to(device)
-    
-    results = []
+
+def run_rcnn_on_audio_timestamps(waveform, sr, timestamps, clip_length_sec, models):
+    """Enhanced RCNN inference with debugging"""
+    results = [[] for _ in models]
     total_len = len(waveform)
     
-    for m in rcnn_models:
-        model_res = []
-        for ts in timestamps:
-            start = int(max(0, (ts - clip_length_sec / 2) * sr))
-            end = int(min(total_len, start + clip_length_sec * sr))
-            seg = waveform[start:end]
-
-            # Ensure it's always a NumPy array (not a scalar)
-            seg = np.array(seg, dtype=np.float32)
-
-            # Skip empty segments or missing model
-            if seg.size == 0 or m is None:
-                model_res.append(None)
+    st.write(f"🔊 Processing audio: {len(timestamps)} timestamps, {total_len} samples at {sr}Hz")
+    
+    for idx, ts in enumerate(timestamps):
+        start_sample = int(max(0, (ts - clip_length_sec/2) * sr))
+        end_sample = int(min(total_len, start_sample + clip_length_sec * sr))
+        segment = waveform[start_sample:end_sample]
+        
+        # Check segment validity
+        if segment.size == 0:
+            st.warning(f"⚠️ Empty audio segment at timestamp {ts}")
+            for j in range(len(models)):
+                results[j].append(None)
+            continue
+            
+        # Normalize audio segment
+        if np.max(np.abs(segment)) > 0:
+            segment = segment / np.max(np.abs(segment))
+        
+        seg_t = torch.tensor(segment).float().unsqueeze(0).unsqueeze(0)  # shape [1,1,N]
+        
+        for j, m in enumerate(models):
+            if m is None:
+                results[j].append(None)
                 continue
-
-            # Convert to tensor safely
-            seg_tensor = torch.as_tensor(seg, dtype=torch.float32, device=device)
-
-            mel_spec = mel_transform(seg_tensor)  # (n_mels, time)
-            mel_spec = mel_spec.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, n_mels, time)
-
+                
             with torch.no_grad():
-                out = m(mel_spec)
-                probs = torch.softmax(out, dim=1).cpu().numpy()[0]
-                pred = int(np.argmax(probs))
-                model_res.append({'pred': pred, 'probs': probs.tolist()})
-
-        results.append(model_res)
+                try:
+                    out = m(seg_t)
+                    if isinstance(out, (list, tuple)):
+                        out = out[0]
+                    
+                    # Handle different output formats
+                    if hasattr(out, 'cpu'):
+                        out = out.cpu()
+                    
+                    if out.dim() > 1 and out.shape[1] > 1:
+                        # Multi-class classification
+                        probs = torch.softmax(out, dim=1).numpy()[0]
+                        pred = int(np.argmax(probs))
+                        max_prob = float(np.max(probs))
+                        results[j].append({'pred': pred, 'probs': probs.tolist(), 'confidence': max_prob})
+                    else:
+                        # Binary classification
+                        prob = float(torch.sigmoid(out).numpy())
+                        pred = int(prob > 0.5)
+                        results[j].append({'pred': pred, 'probs': [1-prob, prob], 'confidence': prob})
+                        
+                except Exception as e:
+                    st.error(f"❌ Audio Model {j+1} error at timestamp {ts}: {str(e)}")
+                    results[j].append(None)
+    
+    # Summary
+    for j, model_results in enumerate(results):
+        valid_results = [r for r in model_results if r is not None]
+        positive_detections = [r for r in valid_results if r.get('pred', 0) > 0]
+        st.write(f"🎵 Audio Model {j+1}: {len(positive_detections)} positive detections out of {len(valid_results)} valid results")
     
     return results
 
+# -------------------------
+# Streamlit UI (Apple Reference Design)
+# -------------------------
 
-# ----------------------------
-# Streamlit app UI
-# ----------------------------
-st.set_page_config(layout="wide", page_title="Multi-model YOLO + RCNN Inference")
-st.title("Multi-model YOLO + RCNN Video/Audio Inference")
+st.set_page_config(page_title="Video Analysis", layout="wide", initial_sidebar_state="auto")
 
-col_l, col_r = st.columns([1,2])
-with col_l:
-    st.header("Config")
-    target_fps = st.number_input("Frame sampling FPS", min_value=1, max_value=30, value=DEFAULT_FPS)
-    audio_clip_len = st.number_input("Audio clip length (s)", min_value=1, max_value=10, value=AUDIO_CLIP_SEC)
-    conf_thresh = st.slider("YOLO confidence threshold", min_value=0.0, max_value=1.0, value=CONF_THRESH)
-    device = get_device()
-    st.write("Device:", device)
+# Apple Design System CSS
+apple_css = """
+<style>
+    /* Apple Design Language */
+    :root {
+        --apple-bg: #ffffff;
+        --apple-bg-secondary: #f5f5f7;
+        --apple-bg-tertiary: #fbfbfd;
+        --apple-text: #1d1d1f;
+        --apple-text-secondary: #86868b;
+        --apple-accent: #007aff;
+        --apple-accent-hover: #0056cc;
+        --apple-success: #30d158;
+        --apple-warning: #ff9500;
+        --apple-error: #ff3b30;
+        --apple-border: #d2d2d7;
+        --apple-separator: #f2f2f7;
+        --apple-radius: 12px;
+        --apple-radius-small: 8px;
+        --apple-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+        --apple-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.12);
+    }
+    
+    /* SF Pro Display font stack */
+    .stApp {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        background: var(--apple-bg-secondary);
+        color: var(--apple-text);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+    
+    .stApp > .main {
+        background: var(--apple-bg-secondary);
+        padding: 24px 32px;
+    }
+    
+    /* Apple Card Component */
+    .apple-card {
+        background: var(--apple-bg);
+        border-radius: var(--apple-radius);
+        box-shadow: var(--apple-shadow);
+        border: 1px solid var(--apple-separator);
+        padding: 24px;
+        margin-bottom: 20px;
+        transition: box-shadow 0.3s ease;
+    }
+    
+    .apple-card:hover {
+        box-shadow: var(--apple-shadow-hover);
+    }
+    
+    /* Apple Header */
+    .apple-header {
+        background: var(--apple-bg);
+        border-radius: var(--apple-radius);
+        box-shadow: var(--apple-shadow);
+        border: 1px solid var(--apple-separator);
+        padding: 32px;
+        margin-bottom: 32px;
+        text-align: center;
+    }
+    
+    .apple-title {
+        font-size: 48px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        color: var(--apple-text);
+        margin: 0 0 8px 0;
+        line-height: 1.1;
+    }
+    
+    .apple-subtitle {
+        font-size: 21px;
+        font-weight: 400;
+        color: var(--apple-text-secondary);
+        margin: 0;
+        line-height: 1.4;
+    }
+    
+    /* Apple Metrics */
+    .apple-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin: 24px 0;
+    }
+    
+    .apple-metric {
+        background: var(--apple-bg-tertiary);
+        border-radius: var(--apple-radius-small);
+        padding: 20px;
+        text-align: center;
+        border: 1px solid var(--apple-separator);
+    }
+    
+    .apple-metric-value {
+        font-size: 32px;
+        font-weight: 700;
+        color: var(--apple-accent);
+        margin-bottom: 4px;
+        font-variant-numeric: tabular-nums;
+    }
+    
+    .apple-metric-label {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--apple-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+    
+    /* Apple Section Headers */
+    .apple-section-header {
+        font-size: 28px;
+        font-weight: 600;
+        color: var(--apple-text);
+        margin: 0 0 16px 0;
+        letter-spacing: -0.02em;
+    }
+    
+    .apple-section-subheader {
+        font-size: 17px;
+        font-weight: 400;
+        color: var(--apple-text-secondary);
+        margin: 0 0 24px 0;
+        line-height: 1.5;
+    }
+    
+    /* Apple Status */
+    .apple-status {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 500;
+        margin: 4px 8px 4px 0;
+    }
+    
+    .apple-status-success {
+        background: rgba(48, 209, 88, 0.1);
+        color: var(--apple-success);
+    }
+    
+    .apple-status-warning {
+        background: rgba(255, 149, 0, 0.1);
+        color: var(--apple-warning);
+    }
+    
+    .apple-status-error {
+        background: rgba(255, 59, 48, 0.1);
+        color: var(--apple-error);
+    }
+    
+    /* Apple Navigation */
+    .apple-nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin: 24px 0;
+    }
+    
+    .apple-nav-info {
+        font-size: 15px;
+        font-weight: 500;
+        color: var(--apple-text-secondary);
+    }
+    
+    /* Override Streamlit Styles */
+    .stSidebar {
+        background: var(--apple-bg);
+        border-right: 1px solid var(--apple-separator);
+    }
+    
+    .stSidebar .stMarkdown h1,
+    .stSidebar .stMarkdown h2,
+    .stSidebar .stMarkdown h3 {
+        color: var(--apple-text);
+        font-weight: 600;
+    }
+    
+    .stButton > button {
+        background: var(--apple-accent);
+        color: white;
+        border: none;
+        border-radius: var(--apple-radius-small);
+        font-weight: 500;
+        font-size: 15px;
+        padding: 12px 24px;
+        transition: all 0.2s ease;
+        box-shadow: none;
+    }
+    
+    .stButton > button:hover {
+        background: var(--apple-accent-hover);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+    }
+    
+    .stSelectbox label, 
+    .stNumberInput label, 
+    .stSlider label,
+    .stFileUploader label {
+        color: var(--apple-text) !important;
+        font-weight: 500 !important;
+        font-size: 15px !important;
+    }
+    
+    .stDataFrame {
+        border-radius: var(--apple-radius-small);
+        overflow: hidden;
+        box-shadow: var(--apple-shadow);
+        border: 1px solid var(--apple-separator);
+    }
+    
+    /* Apple Image Container */
+    .apple-image-container {
+        border-radius: var(--apple-radius-small);
+        overflow: hidden;
+        background: var(--apple-bg-tertiary);
+        border: 1px solid var(--apple-separator);
+        margin-bottom: 16px;
+    }
+    
+    .apple-image-caption {
+        padding: 12px 16px;
+        background: var(--apple-bg-tertiary);
+        border-top: 1px solid var(--apple-separator);
+        font-size: 13px;
+        color: var(--apple-text-secondary);
+        text-align: center;
+    }
+</style>
+"""
+components.html(apple_css, height=0)
 
-with col_r:
-    st.header("Models")
-    st.write("YOLO model paths (3):")
-    for p in YOLO_PATHS: st.write("-", p)
-    st.write("RCNN model paths (2):")
-    for p in RCNN_PATHS: st.write("-", p)
-    st.write(f"RCNN sample rate: {RCNN_SAMPLE_RATE} Hz (shared)")
+# Apple-style Header
+components.html(
+    """
+    <div class='apple-header'>
+        <h1 class='apple-title'>Video Analysis</h1>
+        <p class='apple-subtitle'>Advanced multi-modal detection and analysis platform</p>
+    </div>
+    """,
+    height=180,
+)
 
-st.markdown("---")
-uploaded = st.file_uploader("Upload video (.mp4 .mov .avi .mkv)", type=['mp4','mov','avi','mkv'])
+# Apple-style Sidebar
+with st.sidebar:
+    st.markdown("### Configuration")
+    uploaded = st.file_uploader("Choose a video file", type=['mp4','mov','avi','mkv'], help="Upload your video for analysis")
+    
+    st.markdown("### Analysis Parameters")
+    target_fps = st.number_input("Sample rate (FPS)", min_value=1, max_value=30, value=2, help="Frames per second to analyze")
+    audio_clip_len = st.number_input("Audio window (seconds)", min_value=1, max_value=10, value=2, help="Audio clip duration around each frame")
+    conf_thres = st.slider("Confidence threshold", min_value=0.0, max_value=1.0, value=0.25, step=0.01, help="Minimum confidence for detections")
+    
+    st.markdown("---")
+    analyze_button = st.button("Start Analysis", type="primary")
 
-if uploaded is None:
-    st.info("Upload a video file to run inference.")
-    st.stop()
+# Initialize session state for navigation
+if 'apple_page' not in st.session_state:
+    st.session_state['apple_page'] = 0
 
-# save uploaded temp file
-tmp_video = Path(tempfile.gettempdir()) / uploaded.name
-with open(tmp_video, "wb") as f:
-    f.write(uploaded.read())
-
-st.video(str(tmp_video))
-
-# load models and show load status
-with st.spinner("Loading models / checking status..."):
-    yolo_models, rcnn_models, load_status = check_and_load_models(YOLO_PATHS, RCNN_PATHS, device)
-st.subheader("Model load status")
-cols = st.columns(2)
-with cols[0]:
-    st.write("YOLO models")
-    for s in load_status["yolo"]:
-        if s["loaded"]:
-            st.success(f"Loaded: {s['path']}")
-        else:
-            st.error(f"Failed: {s['path']} — {s['error']}")
-with cols[1]:
-    st.write("RCNN models")
-    for s in load_status["rcnn"]:
-        if s["loaded"]:
-            st.success(f"Loaded: {s['path']}")
-        else:
-            st.error(f"Failed: {s['path']} — {s['error']}")
-
-# extract frames
-with st.spinner("Extracting frames..."):
-    frames, frame_timestamps = extract_frames_with_timestamps(str(tmp_video), target_fps)
-st.success(f"Extracted {len(frames)} frames")
-
-# extract audio (resample once to RCNN_SAMPLE_RATE)
-with st.spinner("Extracting and resampling audio with ffmpeg..."):
-    tmp_wav = Path(tempfile.gettempdir()) / (tmp_video.stem + f"_sr{RCNN_SAMPLE_RATE}.wav")
-    try:
-        extract_audio_with_ffmpeg(tmp_video, tmp_wav, sr=RCNN_SAMPLE_RATE)
-    except Exception as e:
-        st.error(f"ffmpeg audio extraction failed: {e}")
-        st.stop()
-    sf_read = lambda p: sf.read(p)  # define shortcut function
-    waveform, sr = sf_read(tmp_wav)
-    # soundfile returns (data, sr), ensure mono float32
-    if isinstance(waveform, tuple):
-        arr, sr = waveform
+# Main content area
+main_content = st.container()
+with main_content:
+    if uploaded is None:
+        st.markdown("""
+        <div class='apple-card'>
+            <h2 class='apple-section-header'>Welcome to Video Analysis</h2>
+            <p class='apple-section-subheader'>
+                Upload a video file to begin analysis. Our system will detect objects, analyze audio patterns, 
+                and provide comprehensive insights with frame-by-frame annotations.
+            </p>
+            <div class='apple-metrics'>
+                <div class='apple-metric'>
+                    <div class='apple-metric-value'>3</div>
+                    <div class='apple-metric-label'>Vision Models</div>
+                </div>
+                <div class='apple-metric'>
+                    <div class='apple-metric-value'>2</div>
+                    <div class='apple-metric-label'>Audio Models</div>
+                </div>
+                <div class='apple-metric'>
+                    <div class='apple-metric-value'>5</div>
+                    <div class='apple-metric-label'>Total Algorithms</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        arr, sr = waveform, RCNN_SAMPLE_RATE
-    if arr.ndim == 2:
-        arr = arr.mean(axis=1)
-    waveform = arr.astype('float32')
+        # Process uploaded file
+        tmp = Path(tempfile.gettempdir()) / uploaded.name
+        with open(tmp, 'wb') as f:
+            f.write(uploaded.read())
 
-st.success(f"Audio ready (sr={sr}, len={len(waveform)} samples)")
+        # Video preview
+        st.markdown("""
+        <div class='apple-card'>
+            <h2 class='apple-section-header'>Video Preview</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.video(str(tmp))
 
-# run YOLO
-with st.spinner("Running YOLO models on frames..."):
-    yolo_all = run_yolo_on_frames(frames, yolo_models, conf_thres=conf_thresh)
-st.success("YOLO done")
-
-# run RCNN
-with st.spinner("Running RCNN models on audio around each frame timestamp..."):
-    rcnn_all = run_rcnn_on_audio_timestamps(waveform, sr, frame_timestamps, audio_clip_len, rcnn_models, device)
-st.success("RCNN done")
-
-# Label mappings
-YOLO_SOURCES = {
-    0: "ambulance and fire truck detection vision",
-    1: "smoke and fire detection",
-    2: "crash detection vision"
-}
-YOLO2_LABELS = {0: "Smoke", 1: "Fire"}
-
-RCNN_SOURCES = {
-    0: "crash detection sound",
-    1: "ambulance and fire truck detection sound"
-}
-RCNN1_LABELS = {0: "Skid", 1: "Crash", 2: "Background"}
-RCNN2_LABELS = {0: "Ambulance", 1: "Fire Truck", 2: "Police"}
-
-# build combined timeline
-rows = []
-jam = []
-# vision
-for mi, model_results in enumerate(yolo_all):
-    for fi, dets in enumerate(model_results):
-        ts = frame_timestamps[fi]
-        if dets:
-            for d in dets:
-                label = d.get("label", "")
-                # Apply YOLO_2 label remapping
-                if mi == 1 and "cls" in d and d["cls"] in YOLO2_LABELS:
-                    label = YOLO2_LABELS[d["cls"]]
-
-                if label.lower() == "vehicle":
-                    jam.append({
-                        "timestamp": ts,
-                        "time_str": format_ts(ts),
-                        "source": YOLO_SOURCES[mi],
-                        "type": "vision",
-                        "label": label,
-                        "confidence": d.get("conf", 0.0)
-                    })
-                    continue
-
-                rows.append({
-                    "timestamp": ts,
-                    "time_str": format_ts(ts),
-                    "source": YOLO_SOURCES[mi],
-                    "type": "vision",
-                    "label": label,
-                    "confidence": d.get("conf", 0.0)
-                })
-# audio
-for mi, model_results in enumerate(rcnn_all):
-    for fi, res in enumerate(model_results):
-        ts = frame_timestamps[fi]
-        if res is not None:
-            pred = res.get("pred", "")
-            probs = res.get("probs", [0])
-            label = str(pred)
-            # Apply RCNN label remapping
-            if mi == 0 and pred in RCNN1_LABELS:
-                label = RCNN1_LABELS[pred]
-            elif mi == 1 and pred in RCNN2_LABELS:
-                label = RCNN2_LABELS[pred]
+        if analyze_button:
+            # Show model loading status first
+            st.markdown("""
+            <div class='apple-card'>
+                <h2 class='apple-section-header'>Model Loading Status</h2>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # Skip background
-            if label.lower() == "background":
-                continue
+            # Load models with debug info
+            yolo_models = load_yolo_models()
+            rcnn_models = load_rcnn_models()
+            
+            # Check if any models loaded successfully
+            valid_yolo_models = [m for m in yolo_models if m is not None]
+            valid_rcnn_models = [m for m in rcnn_models if m is not None]
+            
+            if len(valid_yolo_models) == 0:
+                st.error("🚨 No YOLO models loaded! Detection will fail.")
+                st.stop()
+            
+            # Extract data
+            with st.spinner('Extracting frames and audio...'):
+                frames, frame_timestamps = extract_frames_with_timestamps(str(tmp), target_fps)
+                waveform, sr = extract_audio_waveform_from_video(str(tmp), sr=16000)
 
-            rows.append({
-                "timestamp": ts,
-                "time_str": format_ts(ts),
-                "source": RCNN_SOURCES[mi],
-                "type": "audio",
-                "label": label,
-                "confidence": max(probs) if probs else 0.0
-            })
+            # Analysis results
+            st.markdown(f"""
+            <div class='apple-card'>
+                <h2 class='apple-section-header'>Extraction Complete</h2>
+                <div class='apple-metrics'>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{len(frames)}</div>
+                        <div class='apple-metric-label'>Frames</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{sr:,}</div>
+                        <div class='apple-metric-label'>Sample Rate</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{len(waveform)/sr:.1f}s</div>
+                        <div class='apple-metric-label'>Duration</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{conf_thres}</div>
+                        <div class='apple-metric-label'>Confidence</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
+            # Run analysis with debug info
+            with st.spinner('Running vision analysis...'):
+                yolo_all = run_yolo_on_frames(frames, yolo_models, conf_thres=conf_thres)
 
-if not rows:
-    st.info("No detections found (or models not loaded).")
-else:
-    df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
-    st.subheader("Combined timeline (table)")
-    st.dataframe(df)
+            with st.spinner('Running audio analysis...'):
+                rcnn_all = run_rcnn_on_audio_timestamps(waveform, sr, frame_timestamps, audio_clip_len, rcnn_models)
 
-    st.subheader("Timeline chart")
-    chart = alt.Chart(df).mark_point(filled=True, size=100).encode(
-        x=alt.X("timestamp:Q", title="Time (s)"),
-        y=alt.Y("source:N", title="Model"),
-        color="type:N",
-        tooltip=["time_str", "source", "type", "label", "confidence"]
-    )
-    st.altair_chart(chart, use_container_width=True)
+            # Build results dataframe
+            rows = []
+            for mi, model_results in enumerate(yolo_all):
+                for fi, dets in enumerate(model_results):
+                    ts = frame_timestamps[fi]
+                    if dets:
+                        for d in dets:
+                            rows.append({
+                                'timestamp': ts,
+                                'time_str': format_ts(ts),
+                                'source': f'Vision Model {mi+1}',
+                                'type': 'Visual',
+                                'detection': d.get('label', 'Unknown'),
+                                'confidence': d.get('conf', 0.0)
+                            })
+            
+            for mi, model_results in enumerate(rcnn_all):
+                for fi, res in enumerate(model_results):
+                    ts = frame_timestamps[fi]
+                    if res is not None:
+                        conf = max(res.get('probs', [0])) if res.get('probs') is not None else 0.0
+                        rows.append({
+                            'timestamp': ts,
+                            'time_str': format_ts(ts),
+                            'source': f'Audio Model {mi+1}',
+                            'type': 'Audio',
+                            'detection': str(res.get('pred', 'Unknown')),
+                            'confidence': conf
+                        })
 
-    st.subheader("Annotated frame previews with audio")
-    preview_n = st.slider("How many annotated frames to preview", 1, min(10, len(frame_timestamps)), 3)
-    shown = 0
-    for fi, ts in enumerate(frame_timestamps):
-        # collect all detections across YOLO models for this frame
-        dets_for_frame = []
-        for mi in range(len(yolo_all)):
-            if fi < len(yolo_all[mi]):
-                dets_for_frame += yolo_all[mi][fi]
-        if dets_for_frame:
-            ann = draw_boxes_on_frame(frames[fi], dets_for_frame)
-            st.image(cv2.cvtColor(ann, cv2.COLOR_BGR2RGB), caption=f"Annotated @ {format_ts(ts)}", use_column_width=True)
-            # audio clip
-            s = int(max(0, (ts - audio_clip_len/2) * sr))
-            e = int(min(len(waveform), s + audio_clip_len * sr))
-            seg = waveform[s:e]
-            if seg.size > 0:
-                st.audio(array_to_wav_bytes(seg, sr))
-            shown += 1
-            if shown >= preview_n:
-                break
+            df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['timestamp','time_str','source','type','detection','confidence'])
 
-# =======================
-# VEHICLE DETECTION TABLE
-# =======================
-if not jam:
-    st.info("No vehicle found (or models not loaded).")
-else:
-    # Convert to DataFrame
-    jam_df = pd.DataFrame(jam).sort_values("timestamp").reset_index(drop=True)
+            # Results summary
+            st.markdown("""
+            <div class='apple-card'>
+                <h2 class='apple-section-header'>Analysis Results</h2>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if df.empty:
+                st.info('🎯 No detections found in this video')
+            else:
+                df_sorted = df.sort_values('timestamp').reset_index(drop=True)
+                
+                # Detection summary
+                total_detections = len(df_sorted)
+                high_conf = len(df_sorted[df_sorted['confidence'] > 0.7])
+                visual_detections = len(df_sorted[df_sorted['type'] == 'Visual'])
+                audio_detections = len(df_sorted[df_sorted['type'] == 'Audio'])
+                
+                st.markdown(f"""
+                <div class='apple-metrics'>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{total_detections}</div>
+                        <div class='apple-metric-label'>Total Detections</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{high_conf}</div>
+                        <div class='apple-metric-label'>High Confidence</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{visual_detections}</div>
+                        <div class='apple-metric-label'>Visual</div>
+                    </div>
+                    <div class='apple-metric'>
+                        <div class='apple-metric-value'>{audio_detections}</div>
+                        <div class='apple-metric-label'>Audio</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.dataframe(df_sorted, use_container_width=True)
+                
+                # Download option
+                csv = df_sorted.to_csv(index=False).encode('utf-8')
+                st.download_button("Download Results", csv, file_name="analysis_results.csv", mime="text/csv")
 
-    # Count vehicles per timestamp
-    vehicle_counts = jam_df.groupby("timestamp").size().reset_index(name="vehicle_count")
+            # Frame viewer
+            st.markdown("""
+            <div class='apple-card'>
+                <h2 class='apple-section-header'>Frame Analysis</h2>
+                <p class='apple-section-subheader'>Review annotated frames with detected objects and play corresponding audio segments.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            frames_per_page = 4
+            total_frames = len(frames)
+            total_pages = max(1, (total_frames + frames_per_page - 1) // frames_per_page)
 
-    # Classify traffic condition
-    def classify_traffic(count):
-        if 0 <= count <= 5:
-            return "empty"
-        elif 6 <= count <= 10:
-            return "fluid"
-        elif 11 <= count <= 15:
-            return "moderate"
-        elif 16 <= count <= 20:
-            return "heavy"
-        else:  # count >= 21
-            return "jam"
+            # Navigation with proper key handling
+            nav_cols = st.columns([1,3,1])
+            
+            # Previous button
+            prev_clicked = nav_cols[0].button("Previous", key="prev_btn", disabled=(st.session_state['apple_page'] == 0))
+            if prev_clicked and st.session_state['apple_page'] > 0:
+                st.session_state['apple_page'] -= 1
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+            
+            # Page info
+            nav_cols[1].markdown(f"""
+            <div class='apple-nav-info' style='text-align: center; padding: 8px;'>
+                Page {st.session_state['apple_page'] + 1} of {total_pages}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Next button
+            next_clicked = nav_cols[2].button("Next", key="next_btn", disabled=(st.session_state['apple_page'] >= total_pages - 1))
+            if next_clicked and st.session_state['apple_page'] < total_pages - 1:
+                st.session_state['apple_page'] += 1
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
 
-    vehicle_counts["traffic_condition"] = vehicle_counts["vehicle_count"].apply(classify_traffic)
+            # Display frames
+            start_idx = st.session_state['apple_page'] * frames_per_page
+            end_idx = min(total_frames, start_idx + frames_per_page)
 
-    # Merge classification back into jam_df
-    jam_df = jam_df.merge(vehicle_counts, on="timestamp", how="left")
+            frame_cols = st.columns(2)
+            for i in range(start_idx, end_idx):
+                col = frame_cols[i % 2]
+                
+                # Aggregate detections for this frame
+                frame_detections = []
+                for mi in range(len(yolo_all)):
+                    if i < len(yolo_all[mi]):
+                        frame_detections += yolo_all[mi][i] or []
+                
+                # Draw annotations
+                annotated_frame = draw_boxes_on_frame(frames[i], frame_detections)
+                
+                # Display with Apple-style container
+                detection_count = len(frame_detections)
+                confidence_avg = sum(d.get('conf', 0) for d in frame_detections) / max(1, detection_count)
+                
+                status_class = "success" if detection_count == 0 else "warning" if confidence_avg < 0.5 else "error"
+                
+                col.markdown(f"""
+                <div class='apple-card'>
+                    <div style='margin-bottom: 12px;'>
+                        <span class='apple-status apple-status-{status_class}'>
+                            {detection_count} detections
+                        </span>
+                        <span style='color: var(--apple-text-secondary); font-size: 13px;'>
+                            {format_ts(frame_timestamps[i])}
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                col.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), use_column_width=True)
+                
+                # Audio for this timestamp
+                start_s = max(0, frame_timestamps[i] - audio_clip_len/2)
+                end_s = min((len(waveform)/sr), start_s + audio_clip_len)
+                audio_segment = waveform[int(start_s*sr):int(end_s*sr)]
+                audio_bytes = array_to_audio_bytes(audio_segment, sr)
+                col.audio(audio_bytes)
 
-    st.subheader("Vehicle Detection Timeline")
-    st.dataframe(jam_df)
-
-    st.subheader("Vehicle Timeline Chart")
-    jam_chart = alt.Chart(jam_df).mark_point(filled=True, size=100).encode(
-        x=alt.X("timestamp:Q", title="Time (s)"),
-        y=alt.Y("traffic_condition:N", title="Traffic Condition"),
-        color=alt.Color("vehicle_count:Q", title="Vehicle Count", scale=alt.Scale(scheme="reds")),
-        tooltip=["time_str", "vehicle_count", "traffic_condition", "confidence"]
-    )
-    st.altair_chart(jam_chart, use_container_width=True)
-
-    csv = df.to_csv(index=False).encode("utf-8")
-    b64 = base64.b64encode(csv).decode()
-    st.markdown(f"[Download timeline CSV](data:file/csv;base64,{b64})")
+        st.markdown("""
+        <div class='apple-card'>
+            <h3 style='color: var(--apple-text-secondary); font-size: 17px; margin: 0 0 12px 0;'>Tips for Better Results</h3>
+            <ul style='color: var(--apple-text-secondary); margin: 0; padding-left: 20px;'>
+                <li>Use higher frame rates for more detailed analysis</li>
+                <li>Ensure good video quality and lighting</li>
+                <li>Audio analysis works best with clear sound</li>
+                <li>Processing time depends on video length and frame rate</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
