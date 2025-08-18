@@ -400,7 +400,7 @@ RCNN_SOURCES = {
     1: "ambulance and fire truck detection sound"
 }
 RCNN1_LABELS = {0: "Skid", 1: "Crash", 2: "Background"}
-RCNN2_LABELS = {0: "Ambulance", 1: "Fire Truck", 2: "Police"}
+RCNN2_LABELS = {0: "Background", 1: "Sirene"}
 
 # build combined timeline
 rows = []
