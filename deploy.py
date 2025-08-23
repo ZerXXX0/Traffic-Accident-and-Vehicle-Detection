@@ -5,8 +5,24 @@ Streamlit app — Multi-model YOLO + RCNN Video/Audio Inference
 - extract short audio clips around each timestamp (keeps audio inside the video)
 - run 3 YOLO models on frames and draw bounding boxes
 - run 2 RCNN models on audio clips
-- combine detections into a single timeline table and timeline chart
+                        st.image(frame_to_show, caption=caption, use_container_width=True)
 - preview frames with bounding boxes and play audio clips
+    # --- quick debug/info summary to help diagnose empty UI blocks
+    st.markdown('<div class="upload-card">', unsafe_allow_html=True)
+    st.markdown('<h4 class="section-header">Debug Info</h4>', unsafe_allow_html=True)
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.write(f"Frames extracted: {len(frames)}")
+        st.write(f"Timestamps: {len(frame_timestamps)}")
+    with col_b:
+        st.write(f"YOLO models loaded: {sum(1 for m in yolo_models if m is not None)} / {len(yolo_models)}")
+        st.write(f"RCNN models loaded: {sum(1 for m in rcnn_models if m is not None)} / {len(rcnn_models)}")
+    with col_c:
+        # show how many non-empty detections per YOLO model
+        for mi, results in enumerate(yolo_all):
+            non_empty = sum(1 for r in results if r)
+            st.write(f"YOLO_{mi+1} non-empty frames: {non_empty}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 Notes:
 - Replace placeholder model-loading lines with your actual model paths/logic.
@@ -31,6 +47,24 @@ import altair as alt
 # -------------------------
 # Helpers
 # -------------------------
+
+# ----- Source & label mappings (used by timeline & UI)
+# These are safe defaults/stubs — replace with your real label maps if needed.
+YOLO_SOURCES = ['YOLO_1', 'YOLO_2', 'YOLO_3']
+RCNN_SOURCES = ['RCNN_1', 'RCNN_2']
+
+# Example label maps: map model class indices or short keys to readable strings
+# Replace the contents with your model's actual labels when available.
+YOLO2_LABELS = {
+    0: 'ambulance',
+    1: 'firetruck',
+    2: 'smoke',
+    3: 'fire',
+    4: 'crash'
+}
+RCNN1_LABELS = {0: 'no_crash', 1: 'crash_sound'}
+RCNN2_LABELS = {0: 'no_siren', 1: 'siren'}
+
 
 def format_ts(sec):
     return str(timedelta(seconds=round(sec, 2)))
@@ -119,6 +153,9 @@ def array_to_audio_bytes(waveform, sr):
     sf.write(bio, waveform, sr, format='WAV')
     bio.seek(0)
     return bio.read()
+
+# Backwards-compatible alias expected by some UI snippets
+array_to_wav_bytes = array_to_audio_bytes
 
 # -------------------------
 # Model loading (restored original functionality)
@@ -536,9 +573,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Main title and subtitle
-st.markdown('<h1 class="main-title">SOAR</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">System of a Road<br>Advanced AI-powered video and audio analysis platform</p>', unsafe_allow_html=True)
+# Main header area: logo centered above subtitle text using base64-embedded HTML to ensure centering
+logo_path = Path(__file__).resolve().parent / 'logo.png'
+if logo_path.exists():
+    try:
+        import base64 as _base64
+        _b = _base64.b64encode(open(logo_path, 'rb').read()).decode('ascii')
+        st.markdown(f"<div style='display:flex;justify-content:center;margin-top:12px;margin-bottom:6px;'><img src='data:image/png;base64,{_b}' style='width:160px;border-radius:12px;'></div>", unsafe_allow_html=True)
+    except Exception:
+        # fallback to Streamlit image if base64 embedding fails
+        st.image(str(logo_path), width=160)
+
+st.markdown('<div style="text-align: center;"><p class="subtitle">System of a Road<br>Advanced AI-powered video and audio analysis platform</p></div>', unsafe_allow_html=True)
 
 # Upload section with Apple-inspired card design
 st.markdown('<div class="upload-card">', unsafe_allow_html=True)
@@ -569,9 +615,13 @@ if uploaded is not None:
 
     st.success(f"✅ Successfully extracted {len(frames)} frames and audio (sample rate: {sr} Hz)")
 
-    # Load models
-    yolo_models = load_yolo_models()
-    rcnn_models = load_rcnn_models()
+    # Load models (persist in session_state so they are not reloaded on pagination)
+    if 'yolo_models' not in st.session_state:
+        st.session_state['yolo_models'] = load_yolo_models()
+    if 'rcnn_models' not in st.session_state:
+        st.session_state['rcnn_models'] = load_rcnn_models()
+    yolo_models = st.session_state['yolo_models']
+    rcnn_models = st.session_state['rcnn_models']
 
     # Run inference
     with st.spinner('🤖 Running AI models on video frames...'):
@@ -704,12 +754,10 @@ if uploaded is not None:
             with col1:
                 if st.button("⏮️ First", disabled=(st.session_state.current_page == 0)):
                     st.session_state.current_page = 0
-                    st.rerun()
             
             with col2:
                 if st.button("◀️ Previous", disabled=(st.session_state.current_page == 0)):
                     st.session_state.current_page -= 1
-                    st.rerun()
             
             with col3:
                 st.markdown(f"<div style='text-align: center; padding: 0.5rem; font-weight: 600;'>Page {st.session_state.current_page + 1} of {total_pages}</div>", unsafe_allow_html=True)
@@ -717,12 +765,10 @@ if uploaded is not None:
             with col4:
                 if st.button("Next ▶️", disabled=(st.session_state.current_page >= total_pages - 1)):
                     st.session_state.current_page += 1
-                    st.rerun()
             
             with col5:
                 if st.button("Last ⏭️", disabled=(st.session_state.current_page >= total_pages - 1)):
                     st.session_state.current_page = total_pages - 1
-                    st.rerun()
         
         # Calculate frame indices for current page
         start_idx = st.session_state.current_page * frames_per_page
