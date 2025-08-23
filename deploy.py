@@ -50,20 +50,21 @@ import altair as alt
 
 # ----- Source & label mappings (used by timeline & UI)
 # These are safe defaults/stubs — replace with your real label maps if needed.
-YOLO_SOURCES = ['YOLO_1', 'YOLO_2', 'YOLO_3']
-RCNN_SOURCES = ['RCNN_1', 'RCNN_2']
+YOLO_SOURCES = {
+    0: "ambulance and fire truck detection vision",
+    1: "smoke and fire detection",
+    2: "crash detection vision"
+}
+RCNN_SOURCES = {
+    0: "crash detection sound",
+    1: "ambulance and fire truck detection sound"
+}
 
 # Example label maps: map model class indices or short keys to readable strings
 # Replace the contents with your model's actual labels when available.
-YOLO2_LABELS = {
-    0: 'ambulance',
-    1: 'firetruck',
-    2: 'smoke',
-    3: 'fire',
-    4: 'crash'
-}
-RCNN1_LABELS = {0: 'no_crash', 1: 'crash_sound'}
-RCNN2_LABELS = {0: 'no_siren', 1: 'siren'}
+YOLO2_LABELS = {0: "Smoke", 1: "Fire"}
+RCNN1_LABELS = {0: "Skid", 1: "Crash", 2: "Background"}
+RCNN2_LABELS = {0: "Background", 1: "Sirene"}
 
 
 def format_ts(sec):
@@ -584,7 +585,7 @@ if logo_path.exists():
         # fallback to Streamlit image if base64 embedding fails
         st.image(str(logo_path), width=160)
 
-st.markdown('<div style="text-align: center;"><p class="subtitle">System of a Road<br>Advanced AI-powered video and audio analysis platform</p></div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align: center;"><p class="subtitle">Advanced AI-powered video and audio analysis platform</p></div>', unsafe_allow_html=True)
 
 # Upload section with Apple-inspired card design
 st.markdown('<div class="upload-card">', unsafe_allow_html=True)
@@ -632,35 +633,64 @@ if uploaded is not None:
 
     # Build a combined DataFrame timeline
     rows = []
+    jam = []
     # Vision detections
     for mi, model_results in enumerate(yolo_all):
         for fi, dets in enumerate(model_results):
             ts = frame_timestamps[fi]
             if dets:
                 for d in dets:
+                    label = d.get("label","")
+                    # Apply YOLO_2 label remapping
+                    if mi == 1 and "cls" in d and d["cls"] in YOLO2_LABELS:
+                        label = YOLO2_LABELS[d["cls"]]
+
+                    if label.lower() == "vehicle":
+                        jam.append({
+                            "timestamp": ts,
+                            "time_str": format_ts(ts),
+                            "source": YOLO_SOURCES[mi],
+                            "type": "vision",
+                            "label": label,
+                            "confidence": d.get("conf", 0.0)
+                        })
+                        continue
+
                     rows.append({
                         'timestamp': ts,
                         'time_str': format_ts(ts),
-                        'source': f'YOLO_{mi+1}',
+                        'source': YOLO_SOURCES[mi],
                         'type': 'vision',
-                        'label': d.get('label', ''),
+                        'label': label,
                         'confidence': d.get('conf', 0.0)
                     })
+                    
     # Audio detections
     for mi, model_results in enumerate(rcnn_all):
         for fi, res in enumerate(model_results):
             ts = frame_timestamps[fi]
             if res is not None:
+                pred = res.get("pred", "")
+                probs = res.get("probs", [0])
+                label = str(pred)
+                # Apply RCNN label remapping
+                if mi == 0 and pred in RCNN1_LABELS:
+                    label = RCNN1_LABELS[pred]
+                elif mi == 1 and pred in RCNN2_LABELS:
+                    label = RCNN2_LABELS[pred]
+                
+                # Skip background
+                if label.lower() == "background":
+                    continue
                 rows.append({
                     'timestamp': ts,
                     'time_str': format_ts(ts),
-                    'source': f'RCNN_{mi+1}',
+                    'source': RCNN_SOURCES[mi],
                     'type': 'audio',
-                    'label': str(res.get('pred', '')),
+                    'label': label,
                     'confidence': max(res.get('probs', [0])) if res.get('probs') is not None else 0.0
                 })
-
-    if not rows:
+    if not jam:
         st.markdown('<div class="upload-card">', unsafe_allow_html=True)
         st.info('🔍 No detections found from any model. Try adjusting the sampling parameters or check if models are loaded correctly.')
         st.markdown("""
@@ -734,6 +764,51 @@ if uploaded is not None:
         )
         st.altair_chart(points, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+        # VEHICLE DETECTION TABLE
+        # =======================
+        if not jam:
+            st.info("No vehicle found (or models not loaded).")
+        else:
+            # Convert to DataFrame
+            jam_df = pd.DataFrame(jam).sort_values("timestamp").reset_index(drop=True)
+
+            # Count vehicles per timestamp
+            vehicle_counts = jam_df.groupby("timestamp").size().reset_index(name="vehicle_count")
+
+            # Classify traffic condition
+            def classify_traffic(count):
+                if 0 <= count <= 5:
+                    return "empty"
+                elif 6 <= count <= 10:
+                    return "fluid"
+                elif 11 <= count <= 15:
+                    return "moderate"
+                elif 16 <= count <= 20:
+                    return "heavy"
+                else:  # count >= 21
+                    return "jam"
+
+            vehicle_counts["traffic_condition"] = vehicle_counts["vehicle_count"].apply(classify_traffic)
+
+            # Merge classification back into jam_df
+            jam_df = jam_df.merge(vehicle_counts, on="timestamp", how="left")
+
+            st.subheader("Vehicle Detection Timeline")
+            st.dataframe(jam_df)
+
+            st.subheader("Vehicle Timeline Chart")
+            jam_chart = alt.Chart(jam_df).mark_point(filled=True, size=100).encode(
+                x=alt.X("timestamp:Q", title="Time (s)"),
+                y=alt.Y("traffic_condition:N", title="Traffic Condition"),
+                color=alt.Color("vehicle_count:Q", title="Vehicle Count", scale=alt.Scale(scheme="reds")),
+                tooltip=["time_str", "vehicle_count", "traffic_condition", "confidence"]
+            )
+            st.altair_chart(jam_chart, use_container_width=True)
+
+            csv = df.to_csv(index=False).encode("utf-8")
+            b64 = base64.b64encode(csv).decode()
+            st.markdown(f"[Download timeline CSV](data:file/csv;base64,{b64})")
 
         # Preview frames section with styling and pagination
         st.markdown('<div class="upload-card">', unsafe_allow_html=True)
