@@ -9,3 +9,4 @@ ultralytics
 altair
 imageio-ffmpeg
 torchvision
+librosa
