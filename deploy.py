@@ -815,7 +815,7 @@ if uploaded is not None:
         st.markdown('<h3 class="section-header">🖼️ Annotated Frame Previews</h3>', unsafe_allow_html=True)
         
         total_frames = len(frame_timestamps)
-        frames_per_page = 4
+        frames_per_page = 100
         total_pages = (total_frames + frames_per_page - 1) // frames_per_page  # Ceiling division
         
         # Initialize session state for pagination

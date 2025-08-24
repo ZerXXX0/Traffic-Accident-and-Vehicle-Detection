@@ -1,11 +1,10 @@
 streamlit
 opencv-python-headless
 torch
+torchvision
 torchaudio
+librosa
 numpy
 pandas
-soundfile
-ultralytics
+moviepy
 altair
-imageio-ffmpeg
-torchvision
