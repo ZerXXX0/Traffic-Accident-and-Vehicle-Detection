@@ -1,10 +1,11 @@
 streamlit
-opencv-python-headless
+opencv-python
 torch
-torchvision
 torchaudio
 librosa
 numpy
 pandas
 moviepy
 altair
+soundfile
+ultralytics
