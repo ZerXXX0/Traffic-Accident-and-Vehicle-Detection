@@ -1,5 +1,5 @@
 streamlit
-opencv-python
+opencv-python-headless
 torch
 torchaudio
 librosa
@@ -8,4 +8,5 @@ pandas
 moviepy
 altair
 soundfile
+imageio[ffmpeg]
 ultralytics
